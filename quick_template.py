@@ -4,8 +4,9 @@ Relay • Feed-Style Summariser (CLI) – File‑based version
 
 * Amazon Bedrock for inference
 * LaunchDarkly AI Configs for prompt/model selection
-* Prints the chosen model as soon as the program starts
-* Accepts a path to a .txt file, reads the entire file into the {{DOCUMENT}} placeholder
+* Asks for a path to a .txt file, reads the **entire** file into the {{DOCUMENT}} placeholder.
+* Provides **neutral defaults** for the prompt variables `audience`, `brand_voice`, and `cta`,
+  which can be overridden via environment variables **or** edited directly in code.
 """
 
 import os, sys, time, random, logging, dotenv, boto3
@@ -29,6 +30,7 @@ log = logging.getLogger("relay-feed-cli")
 
 
 # ─────────────────── helper: extract model params ────────────────────
+
 def extract_params(model_cfg) -> Dict[str, Any]:
     if hasattr(model_cfg, "_parameters") and isinstance(model_cfg._parameters, dict):
         return model_cfg._parameters
@@ -120,7 +122,10 @@ class Bedrock:
 
 
 # ─────────── convert LaunchDarkly messages → Bedrock format ──────────
-def to_bedrock(cfg: AIConfig, doc_text: str) -> Tuple[str, List[Dict[str, Any]]]:
+
+def to_bedrock(cfg: AIConfig, doc_text: str, audience: str,
+               brand_voice: str, cta: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """Replace placeholders in LD messages and ensure the document is included."""
     system_prompt = ""
     messages = []
 
@@ -129,7 +134,13 @@ def to_bedrock(cfg: AIConfig, doc_text: str) -> Tuple[str, List[Dict[str, Any]]]
             system_prompt = m.content
             continue
         role = "user" if m.role == "user" else "assistant"
-        content = m.content.replace("{{document_chunk}}", doc_text)
+        content = (
+            m.content
+            .replace("{{document_chunk}}", doc_text)
+            .replace("{{audience}}", audience)
+            .replace("{{brand_voice}}", brand_voice)
+            .replace("{{cta}}", cta)
+        )
         messages.append({"role": role, "content": [{"text": content}]})
 
     # Ensure the document itself is part of the conversation at least once
@@ -147,9 +158,14 @@ def main():
         log.error("LD_SERVER_KEY missing – add it to .env")
         sys.exit(1)
 
-    # ── run-seed (1-10) ───────────────────────────────────────────────
+    # ── neutral prompt defaults (override via ENV) ───────────────────
+    DEFAULT_AUDIENCE = os.getenv("AUDIENCE", "reader")
+    DEFAULT_BRAND_VOICE = os.getenv("BRAND_VOICE", "Neutral")
+    DEFAULT_CTA = os.getenv("CTA", "Learn more")
+
+    # ── run‑seed (fresh per script launch) ────────────────────────────
     SEED = random.randint(1, 10)
-    log.info("Run-seed: %s", SEED)
+    log.info("Run‑seed: %s", SEED)
 
     ld = LDClient(os.getenv("LD_SERVER_KEY"),
                   os.getenv("LD_AI_CONFIG_ID", "relay-feed"))
@@ -165,8 +181,9 @@ def main():
     # ── initial AI Config just to reveal the model before first input ─
     init_vars = {
         "document_chunk": "",
-        "audience": "end_user",
-        "brand_voice": "Relay",
+        "audience": DEFAULT_AUDIENCE,
+        "brand_voice": DEFAULT_BRAND_VOICE,
+        "cta": DEFAULT_CTA,
         "seed": SEED,
     }
     cfg_init, _ = ld.get_config(ctx, init_vars)
@@ -177,7 +194,7 @@ def main():
 
     metrics = defaultdict(list)
 
-    print("🤖  I'm happy to help! Provide a path to a .txt file for summarization below.")
+    print("🤖  I'm happy to help! Provide a path to a .txt file for summarisation below.")
     print("(type 'exit' to quit)\n")
 
     while True:
@@ -205,10 +222,15 @@ def main():
             print("⚠️  File is empty. Please provide a file with content.\n")
             continue
 
+        audience = os.getenv("AUDIENCE", DEFAULT_AUDIENCE)
+        brand_voice = os.getenv("BRAND_VOICE", DEFAULT_BRAND_VOICE)
+        cta = os.getenv("CTA", DEFAULT_CTA)
+
         variables = {
             "document_chunk": doc,
-            "audience": "end_user",
-            "brand_voice": "Relay",
+            "audience": audience,
+            "brand_voice": brand_voice,
+            "cta": cta,
             "seed": SEED,
         }
         cfg, tracker = ld.get_config(ctx, variables)
@@ -221,7 +243,7 @@ def main():
         }
         inf_cfg = {k: v for k, v in inf_cfg.items() if v is not None}
 
-        system_prompt, msgs = to_bedrock(cfg, doc)
+        system_prompt, msgs = to_bedrock(cfg, doc, audience, brand_voice, cta)
 
         print("\n--- Generating feed messages ---\n")
         try:
@@ -246,7 +268,7 @@ def main():
         if tracker:
             ldclient.get().flush()
 
-        print("\nProvide another file, or press Ctrl-C / type 'exit' to quit.\n")
+        print("\nProvide another file, or press Ctrl‑C / type 'exit' to quit.\n")
 
 
 def finish(metrics):
