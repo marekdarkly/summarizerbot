@@ -123,32 +123,54 @@ class Bedrock:
 
 # ─────────── convert LaunchDarkly messages → Bedrock format ──────────
 
+
 def to_bedrock(cfg: AIConfig, doc_text: str, audience: str,
                brand_voice: str, cta: str) -> Tuple[str, List[Dict[str, Any]]]:
-    """Replace placeholders in LD messages and ensure the document is included."""
+    """Build the Bedrock system & message list, filling all placeholders.
+
+    * Replaces {{document}} **and** {{document_chunk}} with the full txt file
+    * Also fills audience / voice / cta placeholders
+    * Ensures the raw document is present at least once as a user message
+    """
+
     system_prompt = ""
-    messages = []
+    messages: List[Dict[str, Any]] = []
 
     for i, m in enumerate(cfg.messages):
+        # Extract system prompt but still perform substitution
         if i == 0 and m.role == "system":
             system_prompt = m.content
-            continue
+            # fall through to substitution below
         role = "user" if m.role == "user" else "assistant"
         content = (
             m.content
             .replace("{{document_chunk}}", doc_text)
+            .replace("{{document}}", doc_text)
             .replace("{{audience}}", audience)
             .replace("{{brand_voice}}", brand_voice)
             .replace("{{cta}}", cta)
         )
+        if i == 0 and m.role == "system":
+            system_prompt = content  # substituted version
+            continue  # don't also push it into the messages list
         messages.append({"role": role, "content": [{"text": content}]})
 
-    # Ensure the document itself is part of the conversation at least once
+    # If the system prompt came directly from LD variables (rare) it may still
+    # contain mustache tags inserted at runtime; do a final pass.
+    system_prompt = (
+        system_prompt
+        .replace("{{document_chunk}}", doc_text)
+        .replace("{{document}}", doc_text)
+        .replace("{{audience}}", audience)
+        .replace("{{brand_voice}}", brand_voice)
+        .replace("{{cta}}", cta)
+    )
+
+    # Ensure the document is present as a user role at least once (safety net)
     if not any(msg["content"][0]["text"] == doc_text for msg in messages):
         messages.append({"role": "user", "content": [{"text": doc_text}]})
 
     return system_prompt, messages
-
 
 # ───────────────────────────── main ──────────────────────────────────
 
